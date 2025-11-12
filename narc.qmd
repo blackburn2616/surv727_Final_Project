@@ -1,0 +1,8 @@
+---
+title: "narc"
+author: "Reddit"
+format: html
+editor: visual
+---
+
+## Quarto
