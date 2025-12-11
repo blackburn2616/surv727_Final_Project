@@ -6,6 +6,7 @@ Data Files in Data Folder:
 - r_narc_nov11.csv (posts)
 - narc_threads.csv (comment threads)
 - narc_comments.csv (comments)
+- reddit_pulls.R (used to pull the posts, not needed for running the .qmd file)
 
 Files:
 - baseform_en.tsv (lemmatization)
