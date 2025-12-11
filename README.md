@@ -2,11 +2,11 @@
 
 Topic Modeling and Sentiment Analysis for posts in r/narcolepsy
 
-Data Files:
-- r_narc_nov11.csv #for posts
-- narc_threads.csv #for comment threads
-- narc_comments.csv #for comments
+Data Files in Data Folder:
+- r_narc_nov11.csv (posts)
+- narc_threads.csv (comment threads)
+- narc_comments.csv (comments)
 
-Project:
-- final_project.qmd #final project
-
+Files:
+- baseform_en.tsv (lemmatization)
+- final_project.qmd (Final Project)
