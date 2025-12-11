@@ -1,0 +1,387 @@
+---
+title: "Topic Modeling and Sentiment Analysis in r/narcolepsy"
+subtitle: "Final Paper for SURV727"
+author: "Nicole Blackburn"
+date: "`r Sys.Date()`"
+format: 
+  pdf:
+    toc: true
+    number-sections: true
+    colorlinks: true
+    cache: true
+header-includes: \usepackage[singlelinecheck=false]{caption}
+---
+
+[Link to the Github Repository for this project](https://github.com/blackburn2616/surv727_Final_Project)
+
+## Introduction
+
+Hypersomnia sleep disorders are a group of chronic neurological disorders, characterized by excessive daytime sleepiness. People with hypersomnia sleep disorders experience many symptoms that affect their ability to function during the day.
+
+Hypersomnia sleep disorders include:
+
+-   Narcolepsy type 1 (with cataplexy)
+
+-   Narcolepsy type 2 (without cataplexy)
+
+-   Idiopathic Hypersomnia
+
+-   Kleine-Levin syndrome (KLS)
+
+The diagnosis for a sleep disorder is often a long and difficult process, beginning with an overnight sleep study, or polysomnography, and followed by a multiple sleep latency test, or MSLT. Many individuals with a hypersomnia sleep disorder experience symptoms for years before receiving a diagnosis. Hypersomnias can be extremely isolating, causing individuals to miss out on life experiences, negatively impacting their employment and performance at work, and creating hardships in relationships due to absence.
+
+As hypersomnia sleep disorders are rare, individuals are often lacking an in-person support group to share experiences, ask questions, and vent or help cope with having excessive daytime sleepiness and other debilitating symptoms. The r/narcolepsy subreddit serves as an online community for individuals with hypersomnia sleep disorders or for individuals who have a family member with one of these diagnoses. This project pulled posts from the subreddit to examine the topics posted about, their sentiment, and their comment's sentiment to better understand how the subreddit is being used and benefiting this community. It aims to identify which topics are more often positive, which lean more negative, and how the comment section may reflect or contradict this sentiment.
+
+## Methods
+
+### Data Source
+
+Reddit posts and their comments were pulled from the r/narcolepsy subreddit using the RedditExtractoR package, dating from 9/14/2025 to 11/2/2025. In total, 372 post texts were sourced with 3,691 total comments across all posts. Data were cleaned and urls were matched to ensure the posts and comments analyzed came from the same urls.
+
+### Analysis Techniques
+
+Latent Dirichlet Allocation (LDA) topic modeling was used to identify themes across post texts. After excluding stopwords and additional filler words, seven distinct topics were chosen as best summarizing the post content. After naming these topics, AFINN lexicon was utilized for sentiment analysis to provide a numeric score for each topic, with positive values indicating a positive sentiment and negative values indicating a negative sentiment. Then, AFINN lexicon was utilized for sentiment analysis of the comments within each of the seven topics.
+
+## Analysis
+
+### Post Topics
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| include: FALSE
+
+library(RedditExtractoR)
+library(tidyverse)
+library(tidytext)
+library(SentimentAnalysis)
+library(ggplot2)
+library(scales) 
+library(quanteda)
+library(topicmodels)
+library(readr)
+library(knitr)
+library(wordcloud)
+```
+
+```{r}
+#| include: FALSE
+df <- read.csv("data/r_narc_nov11.csv")
+
+df <- df |> 
+  select(date_utc, title, text, comments, url, doc_id) |> 
+  filter(!is.na(text), text != "")
+
+threads <- read.csv("data/narc_threads.csv")
+threads <- threads |> 
+  select(url, title, comments)
+
+data <- df |> 
+  inner_join(threads, by = join_by(url, title, comments))
+
+comments <- read.csv("data/narc_comments.csv")
+comments <- comments |> 
+  select(url, comment, comment_id, X)
+
+com_urls <- comments |> 
+  distinct(url)
+
+data <- data |> 
+  inner_join(com_urls, by = join_by(url)) #combined dataset urls match comment urls
+```
+
+```{r}
+#| include: FALSE
+#| cache: true
+#corpus
+corp = corpus(data, docid_field = "doc_id", text_field = "text")
+
+#tokenization
+corp_tokens <- tokens(
+  corp,
+  remove_punct = TRUE,
+  remove_numbers = TRUE,
+  remove_symbols = TRUE) %>%
+  tokens_tolower()
+
+# Lemmatization
+lemmaData <- read.csv2(
+  "baseform_en.tsv",
+  sep = "\t",
+  header = FALSE,
+  encoding = "UTF-8",
+  stringsAsFactors = F
+)
+
+lemmaData <- na.omit(lemmaData)
+
+corp_tokens <-  tokens_replace(corp_tokens, lemmaData$V1, lemmaData$V2, valuetype = "fixed")
+
+#stopwords
+corp_tokens <- corp_tokens %>%
+  tokens_remove(c(stopwords("english"), "sleep"))
+
+#matrix
+df_matrix = dfm(corp_tokens)
+
+df_matrix = dfm_trim(df_matrix, min_docfreq = 10)
+
+#check for filler words
+token_counts <- colSums(df_matrix)
+
+token_freq <- data.frame(
+  term = names(token_counts),
+  frequency = as.numeric(token_counts)) |> 
+  arrange(desc(frequency))
+
+head(token_freq, 30)
+
+filler_words <- c("get", "t", "like", "just", "take", "m", "can", "go", "s", "ve", "feel")
+
+#stopwords with filler words
+corp_tokens <- corp_tokens %>%
+  tokens_remove(c(stopwords("english"), "sleep", filler_words))
+
+#matrix
+df_matrix = dfm(corp_tokens)
+
+df_matrix = dfm_trim(df_matrix, min_docfreq = 10)
+
+```
+
+```{r}
+#| include: FALSE
+dtm = convert(df_matrix, to = "topicmodels") 
+set.seed(8)
+m = LDA(dtm, method = "Gibbs", k = 7,  control = list(alpha = 0.1))
+
+doc_topics <- topics(m)
+
+term_matrix <- terms(m,10)
+terms_df <- as.data.frame(term_matrix)
+```
+
+Table 1 shows the 10 most common words within each of the seven dominant topics identified with LDA. Due to the concentrated nature of the subreddit, posts were assumed to include some overlap in common words; however, seven topics seemed to best capture the identifable differences between posts. Topic 1 includes posts regarding falling asleep during the daytime. Topic 2 includes sleep experiences in the evening. Topic 3 includes life impact and community experiences. Topic 4 includes posts regarding medication experiences and medication dosing. Topic 5 includes posts about symptoms and advice. Topic 6 includes posts regarding testing and diagnosis. Lastly, topic 7 surrounded medication management and insurance.
+
+```{r}
+#| echo: false
+#| warning: false
+kable(terms_df, caption = "LDA Post Topics", row.names = FALSE)
+```
+
+```{r}
+#| include: false
+topics <- posterior(m)$topics
+
+topicNames <- c(
+  "Topic 1: Daytime Sleep",
+  "Topic 2: Sleep Experiences",
+  "Topic 3: Community and Life Impact",
+  "Topic 4: Medication Dosing",
+  "Topic 5: Symptoms and Advice",
+  "Topic 6: Testing",
+  "Topic 7: Medication Management")
+
+colnames(topics) <- topicNames
+```
+
+Figure 1 shows the distribution of posts by topic, with Topic 4: Medication and Dosing, having the greatest number of posts with 98, while Topic 7: Medication Management has the least number of posts with 25. Overall, users are posting for various reasons, with medications, advice, and sharing experiences being some of the main reasons.
+
+```{r}
+#| echo: false
+#| out-width: "90%"
+doc_topics_df <- as.data.frame(topics) %>%
+  mutate(url = data$url[1:nrow(.)])
+
+doc_topics_df <- doc_topics_df %>%
+  rowwise() %>%
+  mutate(Dominant_Topic = topicNames[which.max(c_across(all_of(topicNames)))]) %>%
+  ungroup() %>%
+  select(url, Dominant_Topic)
+
+ggplot(doc_topics_df, 
+                 aes(x = fct_reorder(Dominant_Topic, table(Dominant_Topic)[Dominant_Topic]), fill = Dominant_Topic)) +
+  geom_bar(width = 0.7) +
+  geom_text(stat = 'count', 
+            aes(label = after_stat(count)), 
+            hjust = -0.3, size = 3.5) +
+  scale_fill_brewer(palette = "Set2") +
+  coord_flip() +
+  labs(
+    title = "Figure 1: Distribution of Posts by Topic", 
+    x = "Topic",
+    y = "Number of Posts") +
+  theme(legend.position = "none") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)), labels = comma)
+```
+
+### Post Sentiment
+
+```{r}
+#| include: FALSE
+data_topics <- data |> 
+  left_join(doc_topics_df, by = "url")
+
+data_topics <- data_topics |> 
+  select(text, url, Dominant_Topic)
+
+tidy_data <- data_topics |> 
+  filter(!is.na(text), text != "") |> 
+  unnest_tokens(word, text)
+
+afinn <- tidy_data |> 
+  inner_join(get_sentiments("afinn"), by = "word") |> 
+  group_by(url, Dominant_Topic) |>                      
+  summarise(afinn_sentiment = sum(value))
+
+data_with_sentiment <- data_topics |> 
+  inner_join(afinn, by = c("url", "Dominant_Topic")) |> 
+  filter(!is.na(afinn_sentiment) & 
+         !is.na(Dominant_Topic))
+```
+
+The sentiment analysis utilized AFINN lexicon to identify a nuanced range of positive and negative posts within each topic. Sentiment Scores by Topic can be found within Table 2, with Topic 7: Medication Management, Topic 3: Community and Life Impact, and Topic 5: Symptoms and Advice being the only topics with a positive average sentiment score of 2.22, 1.64, and 0.47 respectively. The most negative topics include Topic 1: Daytime Sleep and Topic 2: Sleep Experiences, with an average sentiment score of -2.11 and -2.61 respectively. It's important to note the standard deviation is large for all topics and the average sentiment between the most positive and most negative topics is a small range. There are posts with positive and negative sentiments found within every topic.
+
+```{r}
+#| echo: FALSE
+#| warning: FALSE
+afinn_summary <- data_with_sentiment %>%
+  group_by(Dominant_Topic) %>%
+  summarise(
+    n = n(),
+    total = sum(afinn_sentiment),
+    Average = mean(afinn_sentiment),
+    Median = median(afinn_sentiment),
+    Min = min(afinn_sentiment),
+    Max = max(afinn_sentiment),
+    Standard_Deviation = sd(afinn_sentiment),
+    .groups = "drop"
+  )
+
+afinn_post_table <- afinn_summary |>
+  select(Dominant_Topic, n, Average, Median, 
+         Min, Max, Standard_Deviation) |>
+  rename(`Dominant Topic` = Dominant_Topic, `Number of Posts` = n, `Standard Deviation` = Standard_Deviation) |> 
+  arrange(desc(Average))
+
+kable(afinn_post_table, caption = "AFINN Sentiment Scores for Posts by Topic", digits = 2, row.names = FALSE)
+```
+
+To visualize the distribution of sentiment scores for posts, a Violin plot was constructed in Figure 2. Notably, Topic 6: Testing has the lower sentiment score on a single post and Topic 3: Community and Life Impact has the highest sentiment score on a single post. Possible explanations for these values could be a user venting about a terrible testing experience or a user sharing how great their life experiences have been recently relating to their sleep disorder.
+
+```{r}
+#| echo: FALSE
+#| fig-width: 9
+#| fig-height: 6
+dist_violin_topic <- ggplot(data_with_sentiment, 
+                            aes(x = Dominant_Topic, 
+                                y = afinn_sentiment, fill = Dominant_Topic)) +
+  geom_violin(trim = FALSE) +
+  geom_jitter(width = 0.2, alpha = 0.4, size = 1) +
+  labs(
+    x = "Post Topic",
+    y = "AFINN Sentiment Score",
+    title = "Figure 2: Distribution of Post Sentiment Scores by Topic") +
+  coord_flip() +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)), labels = comma)
+
+dist_violin_topic
+```
+
+### Comment Sentiment
+
+```{r}
+#| include: FALSE
+#| warning: false
+post_final <- data_with_sentiment |>
+  select(url, Dominant_Topic, afinn_sentiment) |> 
+  rename(afinn_post = afinn_sentiment)
+
+post_comments <- post_final |> 
+  left_join(comments, by = join_by(url))
+
+tidy_comm <- post_comments |> 
+  mutate(comm_doc = str_c(comment_id, X, sep = "_")) |> 
+  filter(!is.na(comment), comment != "") |> 
+  unnest_tokens(word, comment)
+
+afinn_comm <- tidy_comm |> 
+  inner_join(get_sentiments("afinn"), by = "word") |> 
+  group_by(comm_doc, url) |>                      
+  summarise(afinn_comm = sum(value))
+
+post_comments <- post_comments |>
+  mutate(comm_doc = str_c(comment_id, X, sep = "_"))
+
+comm_with_sentiment <- post_comments |> 
+  left_join(afinn_comm, by = c("url", "comm_doc")) |> 
+  filter(!is.na(afinn_comm) & 
+         !is.na(Dominant_Topic))
+```
+
+After assigning comments to their respective post's topic, Table 3 displays the distribution of comments. Topic 4: Medication Dosing and Topic 3: Community and Life Impact have the most comments. This could be explained by the posts within these topics asking more questions than other topics, possible about the medications other users are taking or inquiring about the ways sleep disorders have impacted one's life.
+
+```{r}
+#| echo: FALSE
+dist_com <- comm_with_sentiment |>
+  group_by(Dominant_Topic) |> 
+  summarise(
+    n = n()) |> 
+  arrange(desc(n)) |> 
+  rename(`Dominant Topic` = Dominant_Topic, `Number of Comments` = n) 
+kable(dist_com, caption = "Distribution of Comments By Topic")
+```
+
+Table 4 displays the AFINN lexicon sentiment scores for comments by their respective post topic. Within the comments, the average sentiment score for all seven topics is positive, ranging from 2.29 for Topic 3: Community and Life Impact to 0.59 for Topic 2: Sleep Experiences. Additionally, the standard deviation is lower for all seven topics compared to the sentiment scores from the posts found in Table 2. Topics 1, 6, and 2 have the lowest average sentiment scores, which mirrors the findings from the post sentiments. These topics include daytime sleep experiences, testing experiences, and evening sleep experiences. The posts within these topics are often venting about negative experiences and frustrations. Their comments are often filled with users validating the original poster's experience or offering similar experiences, which makes sense why they trend towards having lower average sentiment scores.
+
+```{r}
+#| echo: false
+#| warning: false
+afinn_comm_summary <- comm_with_sentiment %>%
+  group_by(Dominant_Topic) %>%
+  summarise(
+    n = n(),                         
+    total = sum(afinn_comm),
+    Average = mean(afinn_comm), 
+    Median = median(afinn_comm),
+    Min = min(afinn_comm),
+    Max = max(afinn_comm),
+    Standard_Deviation = sd(afinn_comm),
+    .groups = "drop"
+  )
+
+afinn_comm_table <- afinn_comm_summary |>
+  select(Dominant_Topic, n, Average, Median, Min, Max, Standard_Deviation) |>
+  rename(`Dominant Topic` = Dominant_Topic, `Number of Comments` = n, `Standard Deviation` = Standard_Deviation) |> 
+  arrange(desc(Average))
+
+kable(afinn_comm_table, caption = "AFINN Sentiment Scores for Comments by Topic", digits = 2, row.names = FALSE)
+```
+
+Comment sentiment scores were also visualized using a violin plot below in Figure 3. Notably, Topic 5: Symptoms and Advice holds both the minimum and maximum sentiment scores. The range of sentiment values could be explained by the original post inquiring about certain symptoms or experiences and their respective comments sharing extremely negative or positive experiences regarding their own symptoms. What works for one person with a sleep disorder may not work for another and posts within the subreddit can often find users contradicting one another other when talking about what works best for themselves.
+
+```{r}
+#| echo: false
+#| fig-width: 9
+#| fig-height: 6
+dist_violin_comm <- ggplot(comm_with_sentiment, 
+                            aes(x = Dominant_Topic, y = afinn_comm, fill = Dominant_Topic)) +
+  geom_violin(trim = FALSE) +
+  geom_jitter(width = 0.2, alpha = 0.25, size = .9) +
+  labs(
+    x = "Post Topic",
+    y = "AFINN Sentiment Score",
+    title = "Figure 3: Distribution of Sentiment Scores for Comments By Topic") +
+  coord_flip() +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)), labels = comma)
+
+dist_violin_comm 
+```
+
+## Conclusion
+
+This analysis demonstrates how the r/narcolepsy subreddit functions as an online space to connect individuals with hypersomnia sleep disorders for sharing information, experiences, seeking advice, and finding community support. By using LDA topic modeling and AFINN sentiment analysis, this project identified seven topics across 372 posts and showed the variation of sentiment within and across topics. Posts about daytime sleep, evening sleep, and testing carried more negative sentiment, reflecting the frustrations and challenges common among these individuals. However, posts related to community and life experiences, advice seeking, and medication management showed more positive sentiment on average, suggesting that users utilize the subreddit with hope to improve their lives and better management of their symptoms. Comment sentiment was consistently more positive than post sentiment, highlighting the community's tendency to support and uplift users posting with frustrations or about negative experiences. Overall, these findings reflect the value and need for an online community so individuals can find connection and support among an isolating, chronic sleep disorder. The r/narcolepsy subreddit not only connects individuals who may lack in-person support but also serves as an important resource for navigating symptoms, treatments, doctors, and the experiences of living with an invisible illness.
