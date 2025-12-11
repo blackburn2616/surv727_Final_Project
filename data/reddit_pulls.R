@@ -20,16 +20,3 @@ write.csv(threads2, "narc_threads.csv")
 
 comments2 <- com_2$comments
 write.csv(comments2, "narc_comments.csv")
-
-
-
-
-
-
-
-
-
-#New csv for only the first 412 posts to match comments
-posts <- posts |>
-  slice(1:412)
-write.csv(posts, "narc_posts.csv")

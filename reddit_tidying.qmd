@@ -3,36 +3,747 @@ title: "r/narcolepsy"
 format: html
 editor: visual
 ---
+
 #load libraries
+
 ```{r}
-library(tidytext)
 library(RedditExtractoR)
+library(tidyverse)
+library(tidytext)
+library(SentimentAnalysis)
+library(ggplot2)
+library(scales) 
+library(quanteda)
+library(topicmodels)
 ```
 
-#read in data created from reddit_pulls.R
-```{r}
-data <- read.csv("r_narc_nov11.csv")
-head(data)
-```
-
+#read csv from reddit_pulls.R
 
 ```{r}
+data <- read.csv("data/narc_posts.csv")
+data <- data |> 
+  select("doc_id", "date_utc","timestamp","title","text","comments","url") |> 
+  relocate("doc_id", .before = "date_utc") |> 
+  filter(!is.na(text), text != "")
 
-```
+threads <- read.csv("data/narc_threads.csv") |> 
+  filter(!is.na(text), text != "")
 
-
-```{r}
-
-```
-
-```{r}
-
-```
-
-```{r}
-
+comments <- read.csv("data/narc_comments.csv")
+comments <- comments |> 
+  filter(url %in% threads$url, 
+         !is.na(comment), comment != "")
 ```
 
 ```{r}
+df <- read.csv("data/r_narc_nov11.csv")
 
+df <- df |> 
+  select(date_utc, title, text, comments, url, doc_id) |> 
+  filter(!is.na(text), text != "")
+
+threads <- read.csv("data/narc_threads.csv")
+threads <- threads |> 
+  select(url, title, comments)
+
+data <- df |> 
+  inner_join(threads, by = join_by(url, title, comments))
+
+comments <- read.csv("data/narc_comments.csv")
+comments <- comments |> 
+  select(url, comment, comment_id)
+
+com_urls <- comments |> 
+  distinct(url)
+
+data <- data |> 
+  inner_join(com_urls, by = join_by(url)) #combined dataset urls match comment urls
+```
+
+# Topic Modeling
+
+```{r}
+#corpus
+corp = corpus(data, docid_field = "doc_id", text_field = "text")
+
+#tokenization
+corp_tokens <- tokens(
+  corp,
+  remove_punct = TRUE,
+  remove_numbers = TRUE,
+  remove_symbols = TRUE) %>%
+  tokens_tolower()
+
+# Lemmatization
+lemmaData <- read.csv2(
+  "baseform_en.tsv",
+  sep = "\t",
+  header = FALSE,
+  encoding = "UTF-8",
+  stringsAsFactors = F
+)
+
+lemmaData <- na.omit(lemmaData)
+
+corp_tokens <-  tokens_replace(corp_tokens, lemmaData$V1, lemmaData$V2, valuetype = "fixed")
+
+#stopwords
+corp_tokens <- corp_tokens %>%
+  tokens_remove(c(stopwords("english"), "sleep"))
+
+#matrix
+df_matrix = dfm(corp_tokens)
+
+df_matrix = dfm_trim(df_matrix, min_docfreq = 10)
+
+#check for filler words
+token_counts <- colSums(df_matrix)
+
+token_freq <- data.frame(
+  term = names(token_counts),
+  frequency = as.numeric(token_counts)) |> 
+  arrange(desc(frequency))
+
+head(token_freq, 30)
+
+filler_words <- c("get", "t", "like", "just", "take", "m", "can", "go", "s", "ve", "feel")
+
+#stopwords with filler words
+corp_tokens <- corp_tokens %>%
+  tokens_remove(c(stopwords("english"), "sleep", filler_words))
+
+#matrix
+df_matrix = dfm(corp_tokens)
+
+df_matrix = dfm_trim(df_matrix, min_docfreq = 10)
+```
+
+```{r}
+dtm = convert(df_matrix, to = "topicmodels") 
+set.seed(8)
+m = LDA(dtm, method = "Gibbs", k = 7,  control = list(alpha = 0.1))
+m
+
+terms(m, 10)
+
+doc_topics <- topics(m)
+table(doc_topics)
+
+term_matrix <- terms(m,10)
+terms_df <- as.data.frame(term_matrix)
+
+# Export to CSV
+#write.csv(terms_df, "lda_top_terms.csv", row.names = FALSE)
+```
+
+```{r}
+#beta tidytext word-topic probabilities
+
+post_topics <- tidy(m, matrix = "beta")
+post_topics
+
+post_top_terms <- post_topics |> 
+  group_by(topic) |> 
+  slice_max(beta, n= 10) |> 
+  ungroup() |> 
+  arrange(topic, -beta)
+
+post_top_terms |> 
+  mutate(term = reorder_within(term, beta, topic)) |> 
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
+```
+
+```{r}
+topics <- posterior(m)$topics
+dim(topics)
+
+topicNames <- c(
+  "Daytime Sleep",
+  "Sleep Experiences",
+  "Community and Life Impact",
+  "Medication Dosing",
+  "Symptoms and Advice",
+  "Testing",
+  "Medication Management")
+
+colnames(topics) <- topicNames
+```
+
+```{r}
+# Convert to dataframe
+doc_topics_df <- as.data.frame(topics) %>%
+  mutate(url = data$url[1:nrow(.)])  # map URLs to rows
+
+# Determine dominant topic
+doc_topics_df <- doc_topics_df %>%
+  rowwise() %>%
+  mutate(Dominant_Topic = topicNames[which.max(c_across(all_of(topicNames)))]) %>%
+  ungroup() %>%
+  select(url, Dominant_Topic)
+
+dom_top_table <- table(doc_topics_df$Dominant_Topic)
+
+kable(dom_top_table, caption = "Topic Naming", row.names = FALSE)
+
+```
+
+```{r}
+dist_plot <- ggplot(doc_topics_df, aes(x = Dominant_Topic, fill = Dominant_Topic)) +
+  geom_bar(color = "black", width = 0.7) +
+  geom_text(stat = 'count', aes(label = after_stat(count)), 
+            hjust = -0.5, size = 3.5) +
+  scale_fill_brewer(palette = "Set2") +
+  coord_flip() +
+  theme_minimal(base_size = 12) +
+  labs(
+    title = "Distribution of r/narcolepsy Posts by Topic",
+    x = "Topic",
+    y = "Number of Posts"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "none"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)), labels = comma)
+
+dist_plot
+
+#ggsave("reddit_topic_histogram.png", plot = dist_plot, width = 8, height = 6, dpi = 300)
+```
+
+```{r}
+data_topics <- data |> 
+  left_join(doc_topics_df, by = "url")
+
+data_topics <- data_topics |> 
+  select(text, url, Dominant_Topic)
+
+data_topics_com <- data_topics |> 
+  inner_join(comments, by = "url", relationship = "many-to-many")
+```
+
+```{r}
+tidy_data <- data_topics %>%
+  select(url, text, Dominant_Topic) %>%
+  filter(!is.na(text), text != "") %>%
+  unnest_tokens(word, text)
+
+any(is.na(tidy_data$word))
+
+afinn_scores <- tidy_data %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%  # joins on word
+  group_by(url, Dominant_Topic) %>%                     # calculate per post
+  summarise(afinn_sentiment = sum(value))
+```
+
+```{r}
+data_with_sentiment <- data_topics %>%
+  inner_join(afinn_scores, by = c("url", "Dominant_Topic"))
+```
+
+# Sentiment
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Add an index per post (optional, just for plotting)
+data_plot <- data_with_sentiment %>%
+  arrange(Dominant_Topic) %>%
+  group_by(Dominant_Topic) %>%
+  mutate(post_index = row_number()) %>%
+  ungroup()
+
+data_plot <- data_plot %>%
+  filter(!is.na(afinn_sentiment))
+```
+
+```{r}
+data_with_sentiment %>%
+  filter(is.na(afinn_sentiment)) %>%
+  select(url, text, Dominant_Topic)
+
+data_plot_clean <- data_plot %>%
+  filter(!is.na(afinn_sentiment) & 
+         !is.na(Dominant_Topic) & 
+         !is.na(post_index))
+
+data_plot_clean
+```
+
+```{r}
+# Summarize AFINN sentiment by dominant topic
+afinn_summary <- data_plot_clean %>%
+  group_by(Dominant_Topic) %>%
+  summarise(
+    n_posts = n(),                          # number of posts per topic
+    total_sentiment = sum(afinn_sentiment), # sum of sentiment scores
+    avg_sentiment = mean(afinn_sentiment),  # mean sentiment score
+    median_sentiment = median(afinn_sentiment),
+    min_sentiment = min(afinn_sentiment),
+    max_sentiment = max(afinn_sentiment),
+    sd_sentiment = sd(afinn_sentiment),
+    .groups = "drop"
+  )
+
+afinn_summary |> 
+  arrange(desc(n_posts))
+```
+
+```{r}
+ggplot(data_plot_clean, aes(x = post_index, y = afinn_sentiment, fill = Dominant_Topic)) +
+  geom_col(show.legend = FALSE, width = 0.5) +
+  facet_wrap(~Dominant_Topic, ncol = 2, scales = "free_x") +
+  labs(
+    x = "Number of Posts",
+    y = "AFINN Sentiment Score"
+  )
+```
+
+```{r}
+dist_violin_topic <- ggplot(data_plot_clean, aes(x = Dominant_Topic, y = afinn_sentiment, fill = Dominant_Topic)) +
+  geom_violin(trim = FALSE, show.legend = FALSE) +   # violin plot
+  geom_jitter(width = 0.2, alpha = 0.5, size = 1) + # optional: show individual points
+  labs(
+    x = "Post Topic",
+    y = "AFINN Sentiment Score",
+    title = "Distribution of Sentiment Scores by Topic"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "none"
+  ) +
+  scale_fill_brewer(palette = "Set2")
+
+dist_violin_topic
+
+ggsave("violin.topic.png", plot = dist_violin_topic, width = 8, height = 6, dpi = 300)
+```
+
+```{r}
+ggplot(data_plot_clean, aes(x = Dominant_Topic, y = afinn_sentiment, fill = Dominant_Topic)) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "Set2") +
+  theme_minimal(base_size = 14) +
+  labs(title = "Distribution of Sentiment by Topic",
+       x = "Topic",
+       y = "AFINN Sentiment Score") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+```
+
+```{r}
+data_summary <- data_plot_clean %>%
+  group_by(Dominant_Topic) %>%
+  summarise(mean_sentiment = mean(afinn_sentiment, na.rm = TRUE))
+
+ggplot(data_summary, aes(x = Dominant_Topic, y = 1, fill = mean_sentiment)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "red", mid = "white", high = "green", midpoint = 0) +
+  theme_minimal() +
+  labs(title = "Average Sentiment by Topic", x = "Topic", y = "") +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank())
+
+```
+
+```{r}
+# Make sure comments is numeric, then sum
+total_comments <- sum(as.numeric(threads$comments), na.rm = TRUE)
+total_comments
+
+```
+
+```{r}
+# Step 4 – Tokenize cleaned text (use 'body' instead of 'content')
+
+# Create a clean version first
+df_clean <- data %>%
+  mutate(text = as.character(text)) %>%
+  filter(!is.na(text), text != "")
+
+# Tokenize the text: convert sentences into individual words
+df_tokens <- df_clean %>%
+  select(text) %>%
+  unnest_tokens(word, text)   # splits 'body' into one word per row
+```
+
+```{r}
+# Step 5 – Remove stop words from tokenized data
+library(tidytext)
+# Use built-in stop words from tidytext
+data("stop_words")
+
+# Remove stop words from our tokenized dataset
+df_tokens_clean <- df_tokens %>%
+  anti_join(stop_words, by = "word")
+
+# Count the most frequent words (after stop word removal)
+word_counts <- df_tokens_clean %>%
+  count(word, sort = TRUE)
+
+# View top 10 most common words
+head(word_counts, 10)
+```
+
+```{r}
+# Step 6 – Perform sentiment analysis using Bing lexicon
+bing_sentiments <- get_sentiments("bing")
+
+# Join tokenized words with sentiment labels
+sentiment_data <- df_tokens_clean %>%
+  inner_join(bing_sentiments, by = "word")
+
+# Count number of positive and negative words
+sentiment_summary <- sentiment_data %>%
+  count(sentiment, sort = TRUE)
+
+# Show summary
+print(sentiment_summary)
+
+# Optional: visualize sentiment counts
+ggplot(sentiment_summary, aes(x = sentiment, y = n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  labs(title = "Sentiment Distribution of r/narcolepsy",
+       x = "Sentiment", y = "Word Count") +
+  theme_minimal()
+```
+
+```{r}
+library(textdata)
+# Step 6 – Perform sentiment analysis using Afinn lexicon
+afinn_sentiments <- get_sentiments("afinn")
+
+# Join tokenized words with sentiment labels
+sent_data_af <- df_tokens_clean %>%
+  inner_join(afinn_sentiments, by = "word")
+
+# Count number of positive and negative words
+sentiment_summary2 <- sent_data_af %>%
+  count(sentiment, sort = TRUE)
+
+# Show summary
+print(sentiment_summary2)
+
+# Optional: visualize sentiment counts
+ggplot(sentiment_summary2, aes(x = sentiment, y = n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  labs(title = "Sentiment Distribution of r/narcolepsy",
+       x = "Sentiment", y = "Word Count") +
+  theme_minimal()
+```
+
+```{r}
+
+tidy_clean <- data %>%
+  mutate(text = as.character(text)) %>%
+  filter(!is.na(text), text != "") |> 
+  ungroup() |> 
+  unnest_tokens(word, text)
+  
+head(df_clean$title)
+
+```
+
+# Comments
+
+```{r}
+data_topics_com <- data_topics_com |> 
+  mutate(comm_id = str_c(doc_id, X, sep = "_"))
+```
+
+comments_subset \<- data_topics_com %\>%
+
+distinct(comment, .keep_all = TRUE)
+
+comments_corp = corpus(comments_subset, text_field = "comment", docid_field = "comm_id")
+
+\# Tokenization
+
+comm_tokens \<- tokens(
+
+comments_corp,
+
+remove_punct = TRUE,
+
+remove_numbers = TRUE,
+
+remove_symbols = TRUE) %\>%
+
+tokens_tolower()
+
+```{r}
+#comments_subset <- data_topics_com %>%
+  #filter(Dominant_Topic == "Medication Management")
+
+comments_subset <- data_topics_com %>%
+  distinct(comment, .keep_all = TRUE) 
+
+comments_corp = corpus(comments_subset, text_field = "comment", docid_field = "comm_id")
+
+# Tokenization
+comm_tokens <- tokens(
+  comments_corp,
+  remove_punct = TRUE,
+  remove_numbers = TRUE,
+  remove_symbols = TRUE) %>%
+  tokens_tolower()
+
+#comm_tokens <- comm_tokens %>%
+  #tokens_remove(c(stopwords("english"), "sleep", "t", "m", "s", "ve", "don", "like", "just", "can", "also", "get"))
+  
+
+#comments_dfm = dfm(comm_tokens)
+
+#comments_dfm = dfm_trim(comments_dfm, min_docfreq = 10)
+```
+
+```{r}
+#comments_subset2 <- comments_subset |> 
+  #full_join(comm_tokens, by = "comm_id")
+
+#k <- 6
+#lda_comments <- LDA(convert(comments_dfm, to = "topicmodels"), k = k, control = list(seed = 123))
+
+#terms(lda_comments, 10)
+```
+
+```{r}
+#nrc
+comments_subset <- data_topics_com %>%
+  distinct(comment, .keep_all = TRUE) 
+
+comments_corp = corpus(comments_subset, text_field = "comment", docid_field = "comm_id")
+
+# Tokenization
+comm_tokens <- tokens(
+  comments_corp,
+  remove_punct = TRUE,
+  remove_numbers = TRUE,
+  remove_symbols = TRUE) %>%
+  tokens_tolower()
+```
+
+```{r}
+comm_tokens_df <- data.frame(
+  doc_id = rep(docnames(comm_tokens), lengths(comm_tokens)),
+  word   = unlist(comm_tokens)
+)
+
+comm_tok_df_nrc <- comm_tokens_df |> 
+  left_join(get_sentiments("nrc"), by = "word", relationship = "many-to-many")
+
+sum(is.na(comm_tok_df_nrc$sentiment))
+```
+
+```{r}
+#bing
+comm_tokens_df <- data.frame(
+  doc_id = rep(docnames(comm_tokens), lengths(comm_tokens)),
+  word   = unlist(comm_tokens)
+)
+
+comm_tok_df_bing <- comm_tokens_df |> 
+  left_join(get_sentiments("bing"), by = "word", relationship = "many-to-many")
+
+sum(is.na(comm_tok_df_bing$sentiment))
+```
+
+```{r}
+#afinn
+comm_tokens_df <- data.frame(
+  doc_id = rep(docnames(comm_tokens), lengths(comm_tokens)),
+  word   = unlist(comm_tokens)
+)
+
+comm_tok_df_afinn <- comm_tokens_df |> 
+  left_join(get_sentiments("afinn"), by = "word", relationship = "many-to-many")
+
+sum(is.na(comm_tok_df_afinn$value))
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+
+# Extract URLs from each comment
+urls <- str_extract_all(comments$url, "http[s]?://\\S+")
+
+# Flatten the list and count unique URLs
+length(urls)
+
+num_unique_urls
+
+```
+
+```{r}
+afinn_scores2 <- comm_tokens_df %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%  # joins on word
+  group_by(doc_id) %>%                     # calculate per post
+  summarise(afinn_sentiment = sum(value, na.rm = TRUE), .groups = "drop")
+
+comments_with_sentiment <- comments_subset %>%
+  left_join(afinn_scores2, by = c("comm_id" = "doc_id"))
+
+doc_sentiment <- comments_with_sentiment %>%
+  group_by(url) %>%
+  summarise(
+    afinn_sentiment = sum(afinn_sentiment),
+    .groups = "drop"
+  )
+
+afinn_summary2 <- affin_scores2 %>%
+  summarise(
+    n_posts = n(),                          # number of posts per topic
+    total_sentiment = sum(afinn_sentiment), # sum of sentiment scores
+    avg_sentiment = mean(afinn_sentiment),  # mean sentiment score
+    median_sentiment = median(afinn_sentiment),
+    min_sentiment = min(afinn_sentiment),
+    max_sentiment = max(afinn_sentiment),
+    sd_sentiment = sd(afinn_sentiment),
+    .groups = "drop"
+  )
+
+```
+
+```{r}
+afinn_scores2 <- comm_tokens_df %>%
+  full_join(get_sentiments("afinn"), by = "word") %>%  # joins on word
+  group_by(doc_id) %>%                     # calculate per post
+  summarise(afinn_sentiment = sum(value, na.rm = TRUE), .groups = "drop")
+
+doc_top <- comments_subset |> 
+  select(Dominant_Topic, comm_id)
+
+afinn_scores2 <- afinn_scores2 |> 
+  left_join(doc_top, by = c("doc_id" = "comm_id"))
+
+tidy_data2 <- comments_subset %>%
+  select(url, doc_id, comm_id, comment) %>%
+  filter(!is.na(comment), comment != "") %>%
+  unnest_tokens(word, comment)
+
+#data("stop_words")
+
+#words_to_remove <- c("sleep", "t", "m", "s", "ve", "don", "like", "just", "can", "also", "get")
+
+# Remove stop words from our tokenized dataset
+#tidy2_clean <- tidy_data2
+
+  #anti_join(stop_words, by = "word") |> 
+  #filter(!word %in% words_to_remove)
+  
+
+# Count the most frequent words (after stop word removal)
+#word_counts <- tidy2_clean %>%
+  #count(word, sort = TRUE)
+
+# View top 10 most common words
+#head(word_counts, 10)
+
+
+
+
+```
+
+```{r}
+afinn_scores2 <- tidy2_clean %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%  # joins on word
+  group_by(comm_id, doc_id) %>%                     # calculate per post
+  summarise(afinn_sentiment = sum(value), .groups = "drop")
+
+tidy_data <- data_topics %>%
+  select(url, text, Dominant_Topic) %>%
+  filter(!is.na(text), text != "") %>%
+  unnest_tokens(word, text)
+```
+
+```{r}
+comm_with_sentiment <- data_topics_com %>%
+  left_join(afinn_scores2, by = c("", "Dominant_Topic"))
+```
+
+```{r}
+
+afinn_summary2 <- affin_scores2 %>%
+  summarise(
+    n_posts = n(),                          # number of posts per topic
+    total_sentiment = sum(afinn_sentiment), # sum of sentiment scores
+    avg_sentiment = mean(afinn_sentiment),  # mean sentiment score
+    median_sentiment = median(afinn_sentiment),
+    min_sentiment = min(afinn_sentiment),
+    max_sentiment = max(afinn_sentiment),
+    sd_sentiment = sd(afinn_sentiment),
+    .groups = "drop"
+  )
+
+afinn_summary |> 
+  arrange(desc(n_posts))
+
+```
+
+```{r}
+summary <- afinn_scores2 
+
+ 
+  group_by(Dominant_Topic) |> 
+  summarise(
+    n_comments = n(),                          # number of posts per topic
+    total_sentiment = sum(afinn_sentiment), # sum of sentiment scores
+    avg_sentiment = mean(afinn_sentiment),  # mean sentiment score
+    median_sentiment = median(afinn_sentiment),
+    min_sentiment = min(afinn_sentiment),
+    max_sentiment = max(afinn_sentiment),
+    sd_sentiment = sd(afinn_sentiment))
+```
+
+```{r}
+summary <- summary |> 
+  filter(!is.na(Dominant_Topic))
+
+comm_violin <- ggplot(summary, aes(x = Dominant_Topic, y = afinn_sentiment, fill = Dominant_Topic)) +
+  geom_violin(trim = FALSE, show.legend = FALSE) +   # violin plot # optional: show individual points
+  labs(
+    x = "Post Topic",
+    y = "AFINN Sentiment Score",
+    title = "Distribution of Comment Sentiment Scores by Topic"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "none"
+  ) +
+  scale_fill_brewer(palette = "Set2")
+
+comm_violin
+
+ggsave("violin.comm.png", plot = comm_violin, width = 8, height = 6, dpi = 300)
+```
+
+# World Clouds
+
+```{r}
+library(wordcloud)
+
+tidy_books %>%
+  anti_join(stop_words) %>%
+  count(word) %>%
+  with(wordcloud(word, n, max.words = 100))
+
+```
+
+# Color
+
+```{r}
+library(RColorBrewer)
+
+colors.9 <- brewer.pal(n = 8, name = "Set2")
+colors.9
 ```
